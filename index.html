@@ -967,6 +967,8 @@ function doManualSearch() {
 
 // ─── Google Books API ──────────────────────────────────────────────────────
 
+// Optional Google Books API key. Paste your key between the quotes if you have one.
+// The app will still attempt search without blocking if this is left blank.
 const GOOGLE_BOOKS_API_KEY = 'AIzaSyAnrDPH1cyA--nIpsCiDN-7KNhWfTFoLTI';
 
 async function searchBooks(query, isISBN) {
@@ -980,12 +982,6 @@ async function searchBooks(query, isISBN) {
   const isISBNSearch = isISBN || looksLikeISBN;
   const term = isISBNSearch ? `isbn:${cleanedISBN}` : raw;
 
-  if (!GOOGLE_BOOKS_API_KEY || GOOGLE_BOOKS_API_KEY.includes('PASTE')) {
-    showToast('Add Google Books API key');
-    statusEl.textContent = '— add api key —';
-    console.error('Missing Google Books API key. Add it to GOOGLE_BOOKS_API_KEY near the searchBooks function.');
-    return;
-  }
 
   try {
     const items = await searchGoogleBooks(term);
@@ -1012,8 +1008,10 @@ async function searchBooks(query, isISBN) {
 }
 
 async function searchGoogleBooks(term) {
-  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=20&printType=books&key=${encodeURIComponent(GOOGLE_BOOKS_API_KEY)}`;
-  console.log('Google Books URL:', url.replace(GOOGLE_BOOKS_API_KEY, '[hidden]'));
+  const key = String(GOOGLE_BOOKS_API_KEY || '').trim();
+  const keyPart = key ? `&key=${encodeURIComponent(key)}` : '';
+  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=20&printType=books${keyPart}`;
+  console.log('Google Books URL:', key ? url.replace(key, '[hidden]') : url);
 
   const res = await fetch(url);
   const data = await res.json().catch(() => ({}));
