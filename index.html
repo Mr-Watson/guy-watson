@@ -780,7 +780,7 @@
 <div id="toast"></div>
 
 <!-- ZXing barcode library -->
-<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
+<script src="https://unpkg.com/@zxing/library@0.18.6/umd/index.min.js"></script>
 
 <script>
 'use strict';
@@ -858,21 +858,32 @@ btnScan.addEventListener('click', () => {
 
 async function startScanner() {
   try {
-    if (!window.ZXing) throw new Error('ZXing not loaded');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Camera API not available. Use HTTPS and a supported browser.');
+    }
+    if (!window.ZXing) {
+      throw new Error('ZXing library not loaded');
+    }
+
     const hints = new Map();
     const formats = [
       ZXing.BarcodeFormat.EAN_13,
       ZXing.BarcodeFormat.EAN_8,
-      ZXing.BarcodeFormat.ISBN,
       ZXing.BarcodeFormat.UPC_A,
       ZXing.BarcodeFormat.UPC_E,
     ];
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+
     codeReader = new ZXing.BrowserMultiFormatReader(hints);
 
-    const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
-    const backCam = devices.find(d => /back|rear|environment/i.test(d.label)) || devices[devices.length - 1];
-    const deviceId = backCam ? backCam.deviceId : undefined;
+    let deviceId = undefined;
+    try {
+      const devices = await codeReader.listVideoInputDevices();
+      const backCam = devices.find(d => /back|rear|environment/i.test(d.label)) || devices[devices.length - 1];
+      deviceId = backCam ? backCam.deviceId : undefined;
+    } catch (deviceError) {
+      console.warn('Could not list cameras, falling back to default camera:', deviceError);
+    }
 
     scannerActive = true;
     btnScan.textContent = '[ stop scanning ]';
@@ -880,18 +891,22 @@ async function startScanner() {
     statusEl.textContent = '— scanning —';
     scanLine.style.display = 'block';
 
-    await codeReader.decodeFromVideoDevice(deviceId, 'video-preview', (result, err) => {
+    await codeReader.decodeFromVideoDevice(deviceId, videoEl, (result, err) => {
       if (result) {
-        const isbn = result.getText();
+        const barcode = result.getText();
         stopScanner();
-        statusEl.textContent = '— found: ' + isbn + ' —';
-        searchBooks(isbn, true);
+        statusEl.textContent = '— found: ' + barcode + ' —';
+        searchBooks(barcode, true);
+      }
+      if (err && !(err instanceof ZXing.NotFoundException)) {
+        console.warn('Scanner warning:', err);
       }
     });
   } catch (e) {
+    console.error('Scanner failed:', e);
     statusEl.textContent = '— camera unavailable —';
     stopScanner();
-    showToast('Camera access denied or unavailable');
+    showToast('Camera unavailable — use HTTPS and allow camera');
   }
 }
 
@@ -925,12 +940,22 @@ function doManualSearch() {
 
 async function searchBooks(query, isISBN) {
   statusEl.textContent = '— searching —';
-  const isbnParam = isISBN ? `isbn:${query}` : query;
-  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(isbnParam)}&maxResults=15&fields=items(id,volumeInfo(title,authors,description,imageLinks,categories,publishedDate,industryIdentifiers))`;
+
+  const raw = String(query || '').trim();
+  const cleanedISBN = raw.replace(/[^0-9Xx]/g, '');
+  const looksLikeISBN = /^[0-9Xx-]{8,20}$/.test(raw) && (cleanedISBN.length === 10 || cleanedISBN.length === 13);
+  const searchTerm = (isISBN || looksLikeISBN) ? `isbn:${cleanedISBN}` : raw;
+  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(searchTerm)}&maxResults=15&printType=books`;
 
   try {
+    console.log('Google Books URL:', url);
+
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`Google Books returned ${res.status}`);
+
     const data = await res.json();
+    console.log('Google Books response:', data);
+
     const items = data.items || [];
 
     if (items.length === 0) {
@@ -939,13 +964,16 @@ async function searchBooks(query, isISBN) {
       return;
     }
 
-    renderResults(query, items);
+    renderResults(raw, items);
     showScreen('results');
-    document.getElementById('results-title').textContent = isISBN
-      ? `isbn: ${query}`
-      : `"${query}"`;
+    document.getElementById('results-title').textContent = (isISBN || looksLikeISBN)
+      ? `isbn: ${cleanedISBN}`
+      : `"${raw}"`;
+
+    statusEl.textContent = '— tap scan to start —';
   } catch (e) {
-    showToast('Search failed — check connection');
+    console.error('Search failed:', e);
+    showToast('Search failed — check console');
     statusEl.textContent = '— error —';
   }
 }
