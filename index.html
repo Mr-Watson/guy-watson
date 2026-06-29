@@ -1003,9 +1003,9 @@ function doManualSearch() {
 
 // ─── Google Books API ──────────────────────────────────────────────────────
 
-// Optional: Google now generally expects an API key for unauthenticated requests.
-// Leave blank and the app will use Open Library only. Add your key between the quotes if you want Google Books results too.
-const GOOGLE_BOOKS_API_KEY = '';
+// Create a Google Books API key, then paste it between the quotes below.
+// Example: const GOOGLE_BOOKS_API_KEY = 'AIza...';
+const GOOGLE_BOOKS_API_KEY = 'AIzaSyAnrDPH1cyA--nIpsCiDN-7KNhWfTFoLTI';
 
 async function searchBooks(query, isISBN) {
   statusEl.textContent = '— searching —';
@@ -1016,75 +1016,54 @@ async function searchBooks(query, isISBN) {
   const cleanedISBN = raw.replace(/[^0-9Xx]/g, '');
   const looksLikeISBN = /^[0-9Xx\-\s]{8,24}$/.test(raw) && (cleanedISBN.length === 10 || cleanedISBN.length === 13);
   const isISBNSearch = isISBN || looksLikeISBN;
-  const googleTerm = isISBNSearch ? `isbn:${cleanedISBN}` : raw;
+  const term = isISBNSearch ? `isbn:${cleanedISBN}` : raw;
 
-  let items = [];
-  let errors = [];
-
-  // Use Open Library first because it does not need your Google key.
-  try {
-    items = await searchOpenLibrary(raw, isISBNSearch, cleanedISBN);
-  } catch (e) {
-    console.warn('Open Library failed:', e);
-    errors.push(e);
-  }
-
-  // Optional Google Books fallback/enrichment. This is skipped unless you add a key above.
-  if (!items.length && GOOGLE_BOOKS_API_KEY) {
-    try {
-      items = await searchGoogleBooks(googleTerm);
-    } catch (e) {
-      console.warn('Google Books failed:', e);
-      errors.push(e);
-    }
-  }
-
-  if (!items.length) {
-    showToast(errors.length ? 'Search failed — check console' : 'No results found');
-    statusEl.textContent = errors.length ? '— error —' : '— no results —';
+  if (!GOOGLE_BOOKS_API_KEY || GOOGLE_BOOKS_API_KEY.includes('PASTE')) {
+    showToast('Add Google Books API key');
+    statusEl.textContent = '— add api key —';
+    console.error('Missing Google Books API key. Add it to GOOGLE_BOOKS_API_KEY near the searchBooks function.');
     return;
   }
 
-  renderResults(raw, items);
-  showScreen('results');
-  document.getElementById('results-title').textContent = isISBNSearch
-    ? `isbn: ${cleanedISBN || raw}`
-    : `"${raw}"`;
+  try {
+    const items = await searchGoogleBooks(term);
 
-  statusEl.textContent = '— tap scan to start —';
+    if (!items.length) {
+      showToast('No results found');
+      statusEl.textContent = '— no results —';
+      return;
+    }
+
+    renderResults(raw, items);
+    showScreen('results');
+    document.getElementById('results-title').textContent = isISBNSearch
+      ? `isbn: ${cleanedISBN || raw}`
+      : `"${raw}"`;
+
+    statusEl.textContent = '— tap scan to start —';
+  } catch (e) {
+    console.error('Search failed:', e);
+    const message = e && e.message ? e.message : String(e);
+    showToast('Search error: ' + message.slice(0, 32));
+    statusEl.textContent = '— search error —';
+  }
 }
 
 async function searchGoogleBooks(term) {
-  const keyPart = GOOGLE_BOOKS_API_KEY ? `&key=${encodeURIComponent(GOOGLE_BOOKS_API_KEY)}` : '';
-  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=20&printType=books${keyPart}`;
+  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=20&printType=books&key=${encodeURIComponent(GOOGLE_BOOKS_API_KEY)}`;
   console.log('Google Books URL:', url.replace(GOOGLE_BOOKS_API_KEY, '[hidden]'));
 
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Google Books returned ${res.status}`);
+  const data = await res.json().catch(() => ({}));
 
-  const data = await res.json();
   console.log('Google Books response:', data);
 
-  return (data.items || []).map(buildGoogleBook).filter(Boolean);
-}
-
-async function searchOpenLibrary(raw, isISBN, cleanedISBN) {
-  const url = isISBN
-    ? `https://openlibrary.org/isbn/${encodeURIComponent(cleanedISBN)}.json`
-    : `https://openlibrary.org/search.json?q=${encodeURIComponent(raw)}&limit=20`;
-
-  console.log('Open Library URL:', url);
-
-  const res = await fetch(url, { mode: 'cors' });
-  if (!res.ok) return [];
-  const data = await res.json();
-  console.log('Open Library response:', data);
-
-  if (isISBN && data && data.title) {
-    return [buildOpenLibraryBook(data, cleanedISBN)];
+  if (!res.ok) {
+    const apiMessage = data?.error?.message || `Google Books returned HTTP ${res.status}`;
+    throw new Error(apiMessage);
   }
 
-  return (data.docs || []).map(buildOpenLibrarySearchBook).filter(Boolean);
+  return (data.items || []).map(buildGoogleBook).filter(Boolean);
 }
 
 function buildGoogleBook(item) {
@@ -1103,32 +1082,6 @@ function buildGoogleBook(item) {
     cover,
     genres: v.categories || [],
     year: v.publishedDate ? v.publishedDate.slice(0, 4) : '',
-  };
-}
-
-function buildOpenLibraryBook(item, isbn) {
-  const cover = isbn ? `https://covers.openlibrary.org/b/isbn/${encodeURIComponent(isbn)}-M.jpg` : null;
-  return {
-    id: 'ol_' + (item.key || isbn || item.title),
-    title: item.title || 'Unknown Title',
-    authors: Array.isArray(item.authors) ? item.authors.map(a => a.name || a.key).join(', ') : 'Unknown Author',
-    description: typeof item.description === 'string' ? item.description : (item.description && item.description.value) || '',
-    cover,
-    genres: item.subjects || [],
-    year: item.publish_date ? String(item.publish_date).slice(0, 4) : '',
-  };
-}
-
-function buildOpenLibrarySearchBook(doc) {
-  const cover = doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : null;
-  return {
-    id: 'ol_' + (doc.key || doc.edition_key?.[0] || doc.title),
-    title: doc.title || 'Unknown Title',
-    authors: doc.author_name ? doc.author_name.join(', ') : 'Unknown Author',
-    description: '',
-    cover,
-    genres: doc.subject ? doc.subject.slice(0, 4) : [],
-    year: doc.first_publish_year ? String(doc.first_publish_year) : '',
   };
 }
 // ─── Render Results ─────────────────────────────────────────────────────────
