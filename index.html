@@ -780,7 +780,7 @@
 <div id="toast"></div>
 
 <!-- ZXing barcode library -->
-<script src="https://unpkg.com/@zxing/library@0.18.6/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
 
 <script>
 'use strict';
@@ -803,6 +803,9 @@ let wantList = DB.get('stack_want');
 
 let scannerActive = false;
 let codeReader = null;
+let scannerStream = null;
+let scannerLoop = null;
+let lastDecodeAttempt = 0;
 let currentDetailBook = null;
 
 // ─── Navigation ────────────────────────────────────────────────────────────
@@ -861,22 +864,77 @@ async function startScanner() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('Camera API not available. Use HTTPS and a supported browser.');
     }
-    if (!window.ZXing) {
-      throw new Error('ZXing library not loaded');
+
+    scannerActive = true;
+    btnScan.textContent = '[ stop scanning ]';
+    btnScan.classList.add('scanning');
+    statusEl.textContent = '— starting camera —';
+    scanLine.style.display = 'block';
+
+    // Prefer native browser barcode detection where available. It is much better on phones.
+    if ('BarcodeDetector' in window) {
+      const supported = await BarcodeDetector.getSupportedFormats().catch(() => []);
+      const requested = ['ean_13', 'ean_8', 'upc_a', 'upc_e'];
+      const formats = requested.filter(f => supported.includes(f));
+      const detector = new BarcodeDetector({ formats: formats.length ? formats : undefined });
+
+      scannerStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      });
+
+      videoEl.srcObject = scannerStream;
+      await videoEl.play();
+      statusEl.textContent = '— scanning —';
+
+      const scanFrame = async (time) => {
+        if (!scannerActive) return;
+
+        // Do not hammer the detector every animation frame.
+        if (time - lastDecodeAttempt > 250 && videoEl.readyState >= 2) {
+          lastDecodeAttempt = time;
+          try {
+            const barcodes = await detector.detect(videoEl);
+            if (barcodes && barcodes.length) {
+              const code = String(barcodes[0].rawValue || '').trim();
+              if (code) {
+                stopScanner();
+                statusEl.textContent = '— found: ' + code + ' —';
+                searchBooks(code, true);
+                return;
+              }
+            }
+          } catch (decodeErr) {
+            console.warn('Native decode warning:', decodeErr);
+          }
+        }
+
+        scannerLoop = requestAnimationFrame(scanFrame);
+      };
+
+      scannerLoop = requestAnimationFrame(scanFrame);
+      return;
     }
 
+    // Fallback for browsers without BarcodeDetector.
+    if (!window.ZXing) throw new Error('ZXing library not loaded');
+
     const hints = new Map();
-    const formats = [
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
       ZXing.BarcodeFormat.EAN_13,
       ZXing.BarcodeFormat.EAN_8,
       ZXing.BarcodeFormat.UPC_A,
       ZXing.BarcodeFormat.UPC_E,
-    ];
-    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+    ]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
 
-    codeReader = new ZXing.BrowserMultiFormatReader(hints);
+    codeReader = new ZXing.BrowserMultiFormatReader(hints, 300);
 
-    let deviceId = undefined;
+    let deviceId;
     try {
       const devices = await codeReader.listVideoInputDevices();
       const backCam = devices.find(d => /back|rear|environment/i.test(d.label)) || devices[devices.length - 1];
@@ -885,20 +943,18 @@ async function startScanner() {
       console.warn('Could not list cameras, falling back to default camera:', deviceError);
     }
 
-    scannerActive = true;
-    btnScan.textContent = '[ stop scanning ]';
-    btnScan.classList.add('scanning');
     statusEl.textContent = '— scanning —';
-    scanLine.style.display = 'block';
 
     await codeReader.decodeFromVideoDevice(deviceId, videoEl, (result, err) => {
       if (result) {
-        const barcode = result.getText();
-        stopScanner();
-        statusEl.textContent = '— found: ' + barcode + ' —';
-        searchBooks(barcode, true);
+        const code = String(result.getText() || '').trim();
+        if (code) {
+          stopScanner();
+          statusEl.textContent = '— found: ' + code + ' —';
+          searchBooks(code, true);
+        }
       }
-      if (err && !(err instanceof ZXing.NotFoundException)) {
+      if (err && window.ZXing && ZXing.NotFoundException && !(err instanceof ZXing.NotFoundException)) {
         console.warn('Scanner warning:', err);
       }
     });
@@ -909,8 +965,18 @@ async function startScanner() {
     showToast('Camera unavailable — use HTTPS and allow camera');
   }
 }
-
 function stopScanner() {
+  if (scannerLoop) {
+    try { cancelAnimationFrame(scannerLoop); } catch {}
+    scannerLoop = null;
+  }
+  if (scannerStream) {
+    try { scannerStream.getTracks().forEach(track => track.stop()); } catch {}
+    scannerStream = null;
+  }
+  if (videoEl) {
+    try { videoEl.pause(); videoEl.srcObject = null; } catch {}
+  }
   if (codeReader) {
     try { codeReader.reset(); } catch {}
     codeReader = null;
@@ -918,10 +984,9 @@ function stopScanner() {
   scannerActive = false;
   btnScan.textContent = '[ scan barcode ]';
   btnScan.classList.remove('scanning');
-  if (statusEl.textContent === '— scanning —') statusEl.textContent = '— tap scan to start —';
+  if (statusEl.textContent === '— scanning —' || statusEl.textContent === '— starting camera —') statusEl.textContent = '— tap scan to start —';
   scanLine.style.display = 'none';
 }
-
 // ─── Manual search ─────────────────────────────────────────────────────────
 
 const manualInput = document.getElementById('manual-input');
@@ -942,23 +1007,21 @@ async function searchBooks(query, isISBN) {
   statusEl.textContent = '— searching —';
 
   const raw = String(query || '').trim();
+  if (!raw) return;
+
   const cleanedISBN = raw.replace(/[^0-9Xx]/g, '');
-  const looksLikeISBN = /^[0-9Xx-]{8,20}$/.test(raw) && (cleanedISBN.length === 10 || cleanedISBN.length === 13);
-  const searchTerm = (isISBN || looksLikeISBN) ? `isbn:${cleanedISBN}` : raw;
-  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(searchTerm)}&maxResults=15&printType=books`;
+  const looksLikeISBN = /^[0-9Xx\-\s]{8,24}$/.test(raw) && (cleanedISBN.length === 10 || cleanedISBN.length === 13);
+  const googleTerm = (isISBN || looksLikeISBN) ? `isbn:${cleanedISBN}` : raw;
 
   try {
-    console.log('Google Books URL:', url);
+    let items = await searchGoogleBooks(googleTerm);
 
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Google Books returned ${res.status}`);
+    // Fallback because Google Books can return no items for some UK editions/barcodes.
+    if (!items.length) {
+      items = await searchOpenLibrary(raw, isISBN || looksLikeISBN, cleanedISBN);
+    }
 
-    const data = await res.json();
-    console.log('Google Books response:', data);
-
-    const items = data.items || [];
-
-    if (items.length === 0) {
+    if (!items.length) {
       showToast('No results found');
       statusEl.textContent = '— no results —';
       return;
@@ -967,7 +1030,7 @@ async function searchBooks(query, isISBN) {
     renderResults(raw, items);
     showScreen('results');
     document.getElementById('results-title').textContent = (isISBN || looksLikeISBN)
-      ? `isbn: ${cleanedISBN}`
+      ? `isbn: ${cleanedISBN || raw}`
       : `"${raw}"`;
 
     statusEl.textContent = '— tap scan to start —';
@@ -978,15 +1041,48 @@ async function searchBooks(query, isISBN) {
   }
 }
 
-function buildBook(item) {
+async function searchGoogleBooks(term) {
+  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=20&printType=books`;
+  console.log('Google Books URL:', url);
+
+  const res = await fetch(url, { mode: 'cors' });
+  if (!res.ok) throw new Error(`Google Books returned ${res.status}`);
+
+  const data = await res.json();
+  console.log('Google Books response:', data);
+
+  return (data.items || []).map(buildGoogleBook).filter(Boolean);
+}
+
+async function searchOpenLibrary(raw, isISBN, cleanedISBN) {
+  const url = isISBN
+    ? `https://openlibrary.org/isbn/${encodeURIComponent(cleanedISBN)}.json`
+    : `https://openlibrary.org/search.json?q=${encodeURIComponent(raw)}&limit=20`;
+
+  console.log('Open Library URL:', url);
+
+  const res = await fetch(url, { mode: 'cors' });
+  if (!res.ok) return [];
+  const data = await res.json();
+  console.log('Open Library response:', data);
+
+  if (isISBN && data && data.title) {
+    return [buildOpenLibraryBook(data, cleanedISBN)];
+  }
+
+  return (data.docs || []).map(buildOpenLibrarySearchBook).filter(Boolean);
+}
+
+function buildGoogleBook(item) {
+  if (!item || !item.volumeInfo) return null;
   const v = item.volumeInfo;
   const thumb = v.imageLinks
     ? (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail || null)
     : null;
-  // upgrade to https and better res
   const cover = thumb ? thumb.replace('http:', 'https:').replace('zoom=1', 'zoom=2') : null;
+
   return {
-    id: item.id,
+    id: 'gb_' + item.id,
     title: v.title || 'Unknown Title',
     authors: v.authors ? v.authors.join(', ') : 'Unknown Author',
     description: v.description || '',
@@ -996,6 +1092,31 @@ function buildBook(item) {
   };
 }
 
+function buildOpenLibraryBook(item, isbn) {
+  const cover = isbn ? `https://covers.openlibrary.org/b/isbn/${encodeURIComponent(isbn)}-M.jpg` : null;
+  return {
+    id: 'ol_' + (item.key || isbn || item.title),
+    title: item.title || 'Unknown Title',
+    authors: Array.isArray(item.authors) ? item.authors.map(a => a.name || a.key).join(', ') : 'Unknown Author',
+    description: typeof item.description === 'string' ? item.description : (item.description && item.description.value) || '',
+    cover,
+    genres: item.subjects || [],
+    year: item.publish_date ? String(item.publish_date).slice(0, 4) : '',
+  };
+}
+
+function buildOpenLibrarySearchBook(doc) {
+  const cover = doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : null;
+  return {
+    id: 'ol_' + (doc.key || doc.edition_key?.[0] || doc.title),
+    title: doc.title || 'Unknown Title',
+    authors: doc.author_name ? doc.author_name.join(', ') : 'Unknown Author',
+    description: '',
+    cover,
+    genres: doc.subject ? doc.subject.slice(0, 4) : [],
+    year: doc.first_publish_year ? String(doc.first_publish_year) : '',
+  };
+}
 // ─── Render Results ─────────────────────────────────────────────────────────
 
 function renderResults(query, items) {
