@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>stack.</title>
+<title>watscan.</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -660,7 +660,7 @@
 <div id="app">
 
   <header>
-    <h1>stack.</h1>
+    <h1>watscan.</h1>
     <span class="tagline">// book scanner</span>
   </header>
 
@@ -797,9 +797,9 @@ const DB = {
   }
 };
 
-let library = DB.get('stack_library');
-let tbr     = DB.get('stack_tbr');
-let wantList = DB.get('stack_want');
+let library = DB.get('watscan_library');
+let tbr     = DB.get('watscan_tbr');
+let wantList = DB.get('watscan_want');
 
 let scannerActive = false;
 let codeReader = null;
@@ -1111,7 +1111,7 @@ function renderResults(query, items) {
 
 function addBook(list, book) {
   const lists = { library, tbr, want: wantList };
-  const keys  = { library: 'stack_library', tbr: 'stack_tbr', want: 'stack_want' };
+  const keys  = { library: 'watscan_library', tbr: 'watscan_tbr', want: 'watscan_want' };
   const arr   = lists[list];
   if (arr.some(b => b.id === book.id)) return;
   arr.push(book);
@@ -1121,7 +1121,7 @@ function addBook(list, book) {
 }
 
 function removeBook(list, id) {
-  const keys  = { library: 'stack_library', tbr: 'stack_tbr', want: 'stack_want' };
+  const keys  = { library: 'watscan_library', tbr: 'watscan_tbr', want: 'watscan_want' };
   const arr   = { library, tbr, want: wantList }[list];
   const idx   = arr.findIndex(b => b.id === id);
   if (idx === -1) return;
