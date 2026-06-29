@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>watscan.</title>
+<title>stack.</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -1003,6 +1003,10 @@ function doManualSearch() {
 
 // ─── Google Books API ──────────────────────────────────────────────────────
 
+// Optional: Google now generally expects an API key for unauthenticated requests.
+// Leave blank and the app will use Open Library only. Add your key between the quotes if you want Google Books results too.
+const GOOGLE_BOOKS_API_KEY = '';
+
 async function searchBooks(query, isISBN) {
   statusEl.textContent = '— searching —';
 
@@ -1011,41 +1015,51 @@ async function searchBooks(query, isISBN) {
 
   const cleanedISBN = raw.replace(/[^0-9Xx]/g, '');
   const looksLikeISBN = /^[0-9Xx\-\s]{8,24}$/.test(raw) && (cleanedISBN.length === 10 || cleanedISBN.length === 13);
-  const googleTerm = (isISBN || looksLikeISBN) ? `isbn:${cleanedISBN}` : raw;
+  const isISBNSearch = isISBN || looksLikeISBN;
+  const googleTerm = isISBNSearch ? `isbn:${cleanedISBN}` : raw;
 
+  let items = [];
+  let errors = [];
+
+  // Use Open Library first because it does not need your Google key.
   try {
-    let items = await searchGoogleBooks(googleTerm);
-
-    // Fallback because Google Books can return no items for some UK editions/barcodes.
-    if (!items.length) {
-      items = await searchOpenLibrary(raw, isISBN || looksLikeISBN, cleanedISBN);
-    }
-
-    if (!items.length) {
-      showToast('No results found');
-      statusEl.textContent = '— no results —';
-      return;
-    }
-
-    renderResults(raw, items);
-    showScreen('results');
-    document.getElementById('results-title').textContent = (isISBN || looksLikeISBN)
-      ? `isbn: ${cleanedISBN || raw}`
-      : `"${raw}"`;
-
-    statusEl.textContent = '— tap scan to start —';
+    items = await searchOpenLibrary(raw, isISBNSearch, cleanedISBN);
   } catch (e) {
-    console.error('Search failed:', e);
-    showToast('Search failed — check console');
-    statusEl.textContent = '— error —';
+    console.warn('Open Library failed:', e);
+    errors.push(e);
   }
+
+  // Optional Google Books fallback/enrichment. This is skipped unless you add a key above.
+  if (!items.length && GOOGLE_BOOKS_API_KEY) {
+    try {
+      items = await searchGoogleBooks(googleTerm);
+    } catch (e) {
+      console.warn('Google Books failed:', e);
+      errors.push(e);
+    }
+  }
+
+  if (!items.length) {
+    showToast(errors.length ? 'Search failed — check console' : 'No results found');
+    statusEl.textContent = errors.length ? '— error —' : '— no results —';
+    return;
+  }
+
+  renderResults(raw, items);
+  showScreen('results');
+  document.getElementById('results-title').textContent = isISBNSearch
+    ? `isbn: ${cleanedISBN || raw}`
+    : `"${raw}"`;
+
+  statusEl.textContent = '— tap scan to start —';
 }
 
 async function searchGoogleBooks(term) {
-  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=20&printType=books`;
-  console.log('Google Books URL:', url);
+  const keyPart = GOOGLE_BOOKS_API_KEY ? `&key=${encodeURIComponent(GOOGLE_BOOKS_API_KEY)}` : '';
+  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=20&printType=books${keyPart}`;
+  console.log('Google Books URL:', url.replace(GOOGLE_BOOKS_API_KEY, '[hidden]'));
 
-  const res = await fetch(url, { mode: 'cors' });
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`Google Books returned ${res.status}`);
 
   const data = await res.json();
