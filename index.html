@@ -864,6 +864,9 @@ async function startScanner() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('Camera API not available. Use HTTPS and a supported browser.');
     }
+    if (!window.ZXing) {
+      throw new Error('ZXing library not loaded');
+    }
 
     scannerActive = true;
     btnScan.textContent = '[ stop scanning ]';
@@ -871,89 +874,50 @@ async function startScanner() {
     statusEl.textContent = '— starting camera —';
     scanLine.style.display = 'block';
 
-    // Prefer native browser barcode detection where available. It is much better on phones.
-    if ('BarcodeDetector' in window) {
-      const supported = await BarcodeDetector.getSupportedFormats().catch(() => []);
-      const requested = ['ean_13', 'ean_8', 'upc_a', 'upc_e'];
-      const formats = requested.filter(f => supported.includes(f));
-      const detector = new BarcodeDetector({ formats: formats.length ? formats : undefined });
-
-      scannerStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: false
-      });
-
-      videoEl.srcObject = scannerStream;
-      await videoEl.play();
-      statusEl.textContent = '— scanning —';
-
-      const scanFrame = async (time) => {
-        if (!scannerActive) return;
-
-        // Do not hammer the detector every animation frame.
-        if (time - lastDecodeAttempt > 250 && videoEl.readyState >= 2) {
-          lastDecodeAttempt = time;
-          try {
-            const barcodes = await detector.detect(videoEl);
-            if (barcodes && barcodes.length) {
-              const code = String(barcodes[0].rawValue || '').trim();
-              if (code) {
-                stopScanner();
-                statusEl.textContent = '— found: ' + code + ' —';
-                searchBooks(code, true);
-                return;
-              }
-            }
-          } catch (decodeErr) {
-            console.warn('Native decode warning:', decodeErr);
-          }
-        }
-
-        scannerLoop = requestAnimationFrame(scanFrame);
-      };
-
-      scannerLoop = requestAnimationFrame(scanFrame);
-      return;
-    }
-
-    // Fallback for browsers without BarcodeDetector.
-    if (!window.ZXing) throw new Error('ZXing library not loaded');
-
+    // Use ZXing directly. Native BarcodeDetector is unreliable for EAN/ISBN on some browsers.
     const hints = new Map();
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
       ZXing.BarcodeFormat.EAN_13,
       ZXing.BarcodeFormat.EAN_8,
       ZXing.BarcodeFormat.UPC_A,
       ZXing.BarcodeFormat.UPC_E,
+      ZXing.BarcodeFormat.CODE_128,
+      ZXing.BarcodeFormat.CODE_39
     ]);
     hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
 
-    codeReader = new ZXing.BrowserMultiFormatReader(hints, 300);
+    codeReader = new ZXing.BrowserMultiFormatReader(hints, 150);
 
-    let deviceId;
-    try {
-      const devices = await codeReader.listVideoInputDevices();
-      const backCam = devices.find(d => /back|rear|environment/i.test(d.label)) || devices[devices.length - 1];
-      deviceId = backCam ? backCam.deviceId : undefined;
-    } catch (deviceError) {
-      console.warn('Could not list cameras, falling back to default camera:', deviceError);
-    }
+    const constraints = {
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        focusMode: { ideal: 'continuous' }
+      },
+      audio: false
+    };
 
-    statusEl.textContent = '— scanning —';
+    statusEl.textContent = '— scanning isbn barcode —';
 
-    await codeReader.decodeFromVideoDevice(deviceId, videoEl, (result, err) => {
+    await codeReader.decodeFromConstraints(constraints, videoEl, (result, err) => {
+      if (!scannerActive) return;
+
       if (result) {
-        const code = String(result.getText() || '').trim();
-        if (code) {
+        const code = String(result.getText() || '').replace(/[^0-9Xx]/g, '').trim();
+        console.log('Barcode detected:', result.getText(), 'cleaned:', code);
+
+        // Book ISBN barcodes are usually EAN-13 numbers starting 978 or 979.
+        // Still allow 8/10/12/13 digit codes so testing with other barcodes is visible.
+        if (code.length >= 8) {
           stopScanner();
           statusEl.textContent = '— found: ' + code + ' —';
           searchBooks(code, true);
+          return;
         }
       }
+
+      // NotFoundException is expected while the camera is searching, so ignore it.
       if (err && window.ZXing && ZXing.NotFoundException && !(err instanceof ZXing.NotFoundException)) {
         console.warn('Scanner warning:', err);
       }
@@ -1005,7 +969,7 @@ function doManualSearch() {
 
 // Create a Google Books API key, then paste it between the quotes below.
 // Example: const GOOGLE_BOOKS_API_KEY = 'AIza...';
-const GOOGLE_BOOKS_API_KEY = 'AIzaSyAnrDPH1cyA--nIpsCiDN-7KNhWfTFoLTI';
+const GOOGLE_BOOKS_API_KEY = '';
 
 async function searchBooks(query, isISBN) {
   statusEl.textContent = '— searching —';
