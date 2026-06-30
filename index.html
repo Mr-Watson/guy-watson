@@ -975,11 +975,21 @@ async function searchBooks(query, isISBN) {
   const cleanedISBN = raw.replace(/[^0-9Xx]/g, '');
   const looksLikeISBN = /^[0-9Xx\-\s]{8,24}$/.test(raw) && (cleanedISBN.length === 10 || cleanedISBN.length === 13);
   const isISBNSearch = isISBN || looksLikeISBN;
-  const term = isISBNSearch ? `isbn:${cleanedISBN}` : raw;
-
+  const googleTerm = isISBNSearch ? `isbn:${cleanedISBN}` : raw;
 
   try {
-    const items = await searchGoogleBooks(term);
+    const [googleItems, openItems] = await Promise.allSettled([
+      searchGoogleBooks(googleTerm),
+      isISBNSearch ? searchOpenLibraryByISBN(cleanedISBN) : searchOpenLibrary(raw)
+    ]);
+
+    const googleBooks = googleItems.status === 'fulfilled' ? googleItems.value : [];
+    const openBooks = openItems.status === 'fulfilled' ? openItems.value : [];
+
+    if (googleItems.status === 'rejected') console.warn('Google Books failed:', googleItems.reason);
+    if (openItems.status === 'rejected') console.warn('Open Library failed:', openItems.reason);
+
+    const items = mergeBookResults(googleBooks, openBooks);
 
     if (!items.length) {
       showToast('No results found');
@@ -1021,24 +1031,133 @@ async function searchGoogleBooks(term) {
   return (data.items || []).map(buildGoogleBook).filter(Boolean);
 }
 
+async function searchOpenLibraryByISBN(isbn) {
+  if (!isbn) return [];
+  const url = `https://openlibrary.org/search.json?isbn=${encodeURIComponent(isbn)}&limit=10`;
+  console.log('Open Library ISBN URL:', url);
+
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(`Open Library returned HTTP ${res.status}`);
+  }
+
+  return (data.docs || []).map(buildOpenLibraryBook).filter(Boolean);
+}
+
+async function searchOpenLibrary(query) {
+  if (!query) return [];
+  const url = `https://openlibrary.org/search.json?q=${encodeURIComponent(query)}&limit=20`;
+  console.log('Open Library search URL:', url);
+
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(`Open Library returned HTTP ${res.status}`);
+  }
+
+  return (data.docs || []).map(buildOpenLibraryBook).filter(Boolean);
+}
+
 function buildGoogleBook(item) {
   if (!item || !item.volumeInfo) return null;
   const v = item.volumeInfo;
+  const ids = v.industryIdentifiers || [];
+  const isbn13 = ids.find(x => x.type === 'ISBN_13')?.identifier || '';
+  const isbn10 = ids.find(x => x.type === 'ISBN_10')?.identifier || '';
+  const isbn = isbn13 || isbn10 || '';
   const thumb = v.imageLinks
     ? (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail || null)
     : null;
   const cover = thumb ? thumb.replace('http:', 'https:').replace('zoom=1', 'zoom=2') : null;
 
   return {
-    id: 'gb_' + item.id,
+    id: isbn ? 'isbn_' + isbn : 'gb_' + item.id,
+    isbn,
     title: v.title || 'Unknown Title',
     authors: v.authors ? v.authors.join(', ') : 'Unknown Author',
     description: v.description || '',
     cover,
     genres: v.categories || [],
     year: v.publishedDate ? v.publishedDate.slice(0, 4) : '',
+    source: 'google'
   };
 }
+
+function buildOpenLibraryBook(doc) {
+  if (!doc) return null;
+  const isbn = Array.isArray(doc.isbn)
+    ? (doc.isbn.find(x => String(x).length === 13) || doc.isbn[0] || '')
+    : '';
+  const cover = doc.cover_i
+    ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`
+    : (isbn ? `https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false` : null);
+
+  return {
+    id: isbn ? 'isbn_' + isbn : 'ol_' + (doc.key || doc.edition_key?.[0] || slugify(doc.title || 'unknown')),
+    isbn,
+    title: doc.title || 'Unknown Title',
+    authors: doc.author_name ? doc.author_name.join(', ') : 'Unknown Author',
+    description: '',
+    cover,
+    genres: doc.subject ? doc.subject.slice(0, 3) : [],
+    year: doc.first_publish_year ? String(doc.first_publish_year) : (doc.publish_year?.[0] ? String(doc.publish_year[0]) : ''),
+    source: 'openlibrary'
+  };
+}
+
+function mergeBookResults(googleBooks, openBooks) {
+  const merged = [];
+  const byKey = new Map();
+
+  // Google usually has better descriptions/cleaner titles, so add it first.
+  [...googleBooks, ...openBooks].forEach(book => {
+    const key = book.isbn
+      ? 'isbn_' + book.isbn
+      : slugify((book.title || '') + '_' + (book.authors || ''));
+
+    if (!byKey.has(key)) {
+      const clone = { ...book, id: book.isbn ? 'isbn_' + book.isbn : book.id };
+      byKey.set(key, clone);
+      merged.push(clone);
+      return;
+    }
+
+    const existing = byKey.get(key);
+
+    // Fill missing/weak fields from the second source.
+    if ((!existing.cover || existing.cover.includes('default=false')) && book.cover) existing.cover = book.cover;
+    if ((!existing.description || existing.description.length < 30) && book.description) existing.description = book.description;
+    if ((!existing.title || existing.title === 'Unknown Title') && book.title) existing.title = book.title;
+    if ((!existing.authors || existing.authors === 'Unknown Author') && book.authors) existing.authors = book.authors;
+    if (!existing.year && book.year) existing.year = book.year;
+    if ((!existing.genres || !existing.genres.length) && book.genres?.length) existing.genres = book.genres;
+    if (!existing.isbn && book.isbn) {
+      existing.isbn = book.isbn;
+      existing.id = 'isbn_' + book.isbn;
+    }
+    existing.source = existing.source === book.source ? existing.source : 'google+openlibrary';
+  });
+
+  // Prefer results with covers, then ISBNs, then descriptions.
+  merged.sort((a, b) => {
+    const score = x => (x.cover ? 4 : 0) + (x.isbn ? 3 : 0) + (x.description ? 2 : 0) + (x.year ? 1 : 0);
+    return score(b) - score(a);
+  });
+
+  return merged;
+}
+
+function slugify(str) {
+  return String(str || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+}
+
 // ─── Render Results ─────────────────────────────────────────────────────────
 
 function renderResults(query, items) {
