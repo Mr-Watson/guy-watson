@@ -808,6 +808,11 @@ let scannerLoop = null;
 let lastDecodeAttempt = 0;
 let currentDetailBook = null;
 
+const scanCanvas = document.createElement('canvas');
+const scanCanvasCtx = scanCanvas.getContext('2d');
+const rotatedCanvas = document.createElement('canvas');
+const rotatedCanvasCtx = rotatedCanvas.getContext('2d');
+
 // ─── Navigation ────────────────────────────────────────────────────────────
 
 const navBtns  = document.querySelectorAll('.nav-btn');
@@ -874,10 +879,10 @@ async function startScanner() {
     statusEl.textContent = '— starting camera —';
     scanLine.style.display = 'block';
 
-    // Use ZXing directly. Native BarcodeDetector is unreliable for EAN/ISBN on some browsers.
     const hints = new Map();
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
       ZXing.BarcodeFormat.EAN_13,
+      ZXing.BarcodeFormat.EAN_8,
     ]);
     hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
 
@@ -893,30 +898,14 @@ async function startScanner() {
       audio: false
     };
 
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    scannerStream = stream;
+    videoEl.srcObject = stream;
+    await videoEl.play();
+
     statusEl.textContent = '— scanning isbn barcode —';
+    scannerLoop = requestAnimationFrame(scanLoop);
 
-    await codeReader.decodeFromConstraints(constraints, videoEl, (result, err) => {
-      if (!scannerActive) return;
-
-      if (result) {
-        const code = String(result.getText() || '').replace(/[^0-9Xx]/g, '').trim();
-        console.log('Barcode detected:', result.getText(), 'cleaned:', code);
-
-        // Book ISBN barcodes are usually EAN-13 numbers starting 978 or 979.
-        // Still allow 8/10/12/13 digit codes so testing with other barcodes is visible.
-        if (code.length >= 8) {
-          stopScanner();
-          statusEl.textContent = '— found: ' + code + ' —';
-          searchBooks(code, true);
-          return;
-        }
-      }
-
-      // NotFoundException is expected while the camera is searching, so ignore it.
-      if (err && window.ZXing && ZXing.NotFoundException && !(err instanceof ZXing.NotFoundException)) {
-        console.warn('Scanner warning:', err);
-      }
-    });
   } catch (e) {
     console.error('Scanner failed:', e);
     statusEl.textContent = '— camera unavailable —';
@@ -946,6 +935,97 @@ function stopScanner() {
   if (statusEl.textContent === '— scanning —' || statusEl.textContent === '— starting camera —') statusEl.textContent = '— tap scan to start —';
   scanLine.style.display = 'none';
 }
+
+function setCanvasSize(canvas, width, height) {
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+}
+
+function rotateCanvas(angle) {
+  const w = scanCanvas.width;
+  const h = scanCanvas.height;
+  const rad = angle * Math.PI / 180;
+  const absCos = Math.abs(Math.cos(rad));
+  const absSin = Math.abs(Math.sin(rad));
+  const rotatedWidth = Math.ceil(w * absCos + h * absSin);
+  const rotatedHeight = Math.ceil(h * absCos + w * absSin);
+
+  setCanvasSize(rotatedCanvas, rotatedWidth, rotatedHeight);
+  rotatedCanvasCtx.setTransform(1, 0, 0, 1, 0, 0);
+  rotatedCanvasCtx.clearRect(0, 0, rotatedWidth, rotatedHeight);
+  rotatedCanvasCtx.translate(rotatedWidth / 2, rotatedHeight / 2);
+  rotatedCanvasCtx.rotate(rad);
+  rotatedCanvasCtx.drawImage(scanCanvas, -w / 2, -h / 2);
+}
+
+async function tryDecodeCanvas(url) {
+  try {
+    return await codeReader.decodeFromImageUrl(url);
+  } catch (err) {
+    if (window.ZXing && ZXing.NotFoundException && err instanceof ZXing.NotFoundException) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function scanFrame() {
+  if (!videoEl.videoWidth || !videoEl.videoHeight) return null;
+  setCanvasSize(scanCanvas, videoEl.videoWidth, videoEl.videoHeight);
+  scanCanvasCtx.drawImage(videoEl, 0, 0, scanCanvas.width, scanCanvas.height);
+
+  const angles = [0, 45, 90, 135, 180, 225, 270, 315];
+  for (const angle of angles) {
+    if (angle === 0) {
+      const dataUrl = scanCanvas.toDataURL('image/png');
+      const result = await tryDecodeCanvas(dataUrl);
+      if (result) return result;
+      continue;
+    }
+
+    rotateCanvas(angle);
+    const dataUrl = rotatedCanvas.toDataURL('image/png');
+    const result = await tryDecodeCanvas(dataUrl);
+    if (result) return result;
+  }
+
+  return null;
+}
+
+async function scanLoop() {
+  if (!scannerActive) return;
+  const now = Date.now();
+  if (now - lastDecodeAttempt < 250) {
+    scannerLoop = requestAnimationFrame(scanLoop);
+    return;
+  }
+
+  lastDecodeAttempt = now;
+
+  try {
+    const result = await scanFrame();
+    if (result) {
+      const code = String(result.getText() || '').replace(/[^0-9Xx]/g, '').trim();
+      console.log('Barcode detected:', result.getText(), 'cleaned:', code);
+
+      if (code.length >= 8) {
+        stopScanner();
+        statusEl.textContent = '— found: ' + code + ' —';
+        searchBooks(code, true);
+        return;
+      }
+    }
+  } catch (err) {
+    if (window.ZXing && ZXing.NotFoundException && !(err instanceof ZXing.NotFoundException)) {
+      console.warn('Scanner warning:', err);
+    }
+  }
+
+  scannerLoop = requestAnimationFrame(scanLoop);
+}
+
 // ─── Manual search ─────────────────────────────────────────────────────────
 
 const manualInput = document.getElementById('manual-input');
